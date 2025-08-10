@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Flappy Bird Nâng Cấp - Fix Pipe Overlap</title>
+  <style>
+    html,body{height:100%;margin:0;background:#70c5ce;}
+    .wrap{display:flex;align-items:center;justify-content:center;height:100%;}
+    canvas{border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.25);}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="game"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Kích thước game gốc
+const LOG_W = 420, LOG_H = 640;
+function resize() {
+  const maxW = Math.min(window.innerWidth-24,480);
+  const maxH = Math.min(window.innerHeight-24,800);
+  const ratio = Math.min(maxW/LOG_W, maxH/LOG_H);
+  const cssW = Math.round(LOG_W*ratio);
+  const cssH = Math.round(LOG_H*ratio);
+  canvas.style.width = cssW+'px';
+  canvas.style.height = cssH+'px';
+  const dpr = Math.min(window.devicePixelRatio||1,2);
+  canvas.width = Math.round(cssW*dpr);
+  canvas.height = Math.round(cssH*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize',resize);
+resize();
+
+// Trạng thái
+let state='menu', score=0, best=Number(localStorage.getItem('flappy_best')||0);
+
+// Chim
+const bird={x:LOG_W*0.27,y:LOG_H*0.45,r:14,vy:0,rotation:0};
+const GRAVITY=1200,FLAP_V=-320,MAX_DOWN_V=700;
+
+// Ống
+const pipes=[];
+const PIPE_W=62,GAP=150,GROUND_H=96;
+let pipeTimer=0,PIPE_INTERVAL=1.4,PIPE_SPEED=140;
+
+let lastTime=null;
+
+// Âm thanh
+const audioCtx=(typeof AudioContext!=='undefined')?new AudioContext():null;
+function playTone(freq,duration=0.08,type='sine',vol=0.12){
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type=type;o.frequency.value=freq;g.gain.value=vol;
+  o.connect(g);g.connect(audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+duration);
+}
+function playFlap(){playTone(700,0.07,'sawtooth',0.06);}
+function playHit(){playTone(120,0.18,'square',0.18);}
+function playScore(){playTone(1000,0.06);playTone(1300,0.06);}
+
+function randRange(a,b){return a+Math.random()*(b-a);}
+
+/* --- spawnPipe: đảm bảo khoảng cách tối thiểu giữa 2 ống --- */
+function spawnPipe(){
+  const minSpacing = 160;             // khoảng cách ngang tối thiểu giữa 2 ống
+  const baseX = LOG_W + 20;
+  let x = baseX;
+
+  if (pipes.length > 0) {
+    const last = pipes[pipes.length - 1];
+    const desiredX = last.x + minSpacing;
+    if (desiredX > x) x = desiredX;   // nếu ống trước còn quá gần, đẩy ống mới ra xa hơn
+  }
+
+  const marginTop = 40, marginBottom = 80;
+  const centerY = randRange(marginTop + GAP/2, LOG_H - GROUND_H - marginBottom - GAP/2);
+  pipes.push({ x, gapY: centerY, passed: false });
+}
+
+/* --- reset --- */
+function reset(){
+  score=0;
+  pipes.length=0;
+  pipeTimer=0;
+  bird.y=LOG_H*0.45;
+  bird.vy=0;
+  bird.rotation=0;
+  lastTime=null;
+  // Spawn sẵn 2 ống cách xa
+  for(let i=1;i<=2;i++){
+    pipes.push({x:LOG_W + i*180, gapY: randRange(150,LOG_H-GROUND_H-150), passed:false});
+  }
+  state='menu';
+}
+
+/* --- input / flap --- */
+function flap(){
+  if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume();
+  if(state==='menu'){ state='playing'; bird.vy=FLAP_V; playFlap(); }
+  else if(state==='playing'){ bird.vy=FLAP_V; playFlap(); }
+  else if(state==='dead'){ reset(); }
+}
+window.addEventListener('keydown',e=>{
+  if(e.code==='Space'){ e.preventDefault(); flap(); }
+  if(e.code==='KeyR' && state==='dead'){ reset(); }
+});
+canvas.addEventListener('mousedown',()=>flap());
+canvas.addEventListener('touchstart',e=>{ e.preventDefault(); flap(); }, {passive:false});
+
+function circleRectCollides(cx,cy,r,rx,ry,rw,rh){
+  const closestX=Math.max(rx,Math.min(cx,rx+rw));
+  const closestY=Math.max(ry,Math.min(cy,ry+rh));
+  const dx=cx-closestX, dy=cy-closestY;
+  return dx*dx + dy*dy < r*r;
+}
+
+function die(){
+  if(state!=='dead'){ state='dead'; playHit(); }
+}
+
+/* --- update (chú ý: dùng WHILE để xử lý nhiều interval nếu dt lớn) --- */
+function update(dt){
+  if(state==='playing'){
+    bird.vy += GRAVITY * dt;
+    if (bird.vy > MAX_DOWN_V) bird.vy = MAX_DOWN_V;
+    bird.y += bird.vy * dt;
+    bird.rotation = Math.max(-0.6, Math.min(1.2, bird.vy / 500));
+
+    pipeTimer += dt;
+    // dùng while để không bỏ sót các interval khi dt lớn (tránh spawn dồn)
+    while (pipeTimer >= PIPE_INTERVAL) {
+      pipeTimer -= PIPE_INTERVAL;
+      spawnPipe();
+    }
+
+    for (let i = pipes.length - 1; i >= 0; i--) {
+      const p = pipes[i];
+      p.x -= PIPE_SPEED * dt;
+      if (!p.passed && p.x + PIPE_W < bird.x - bird.r) {
+        p.passed = true;
+        score++; playScore();
+        if (score > best) { best = score; localStorage.setItem('flappy_best', best); }
+      }
+      if (p.x + PIPE_W < -50) pipes.splice(i,1);
+    }
+
+    for (const p of pipes) {
+      const topRect = { x: p.x, y: 0, w: PIPE_W, h: p.gapY - GAP/2 };
+      const botRect = { x: p.x, y: p.gapY + GAP/2, w: PIPE_W, h: LOG_H - GROUND_H - (p.gapY + GAP/2) };
+      if (circleRectCollides(bird.x, bird.y, bird.r, topRect.x, topRect.y, topRect.w, topRect.h) ||
+          circleRectCollides(bird.x, bird.y, bird.r, botRect.x, botRect.y, botRect.w, botRect.h)) {
+        die();
+      }
+    }
+
+    if (bird.y + bird.r >= LOG_H - GROUND_H) { bird.y = LOG_H - GROUND_H - bird.r; die(); }
+    if (bird.y - bird.r <= 0) bird.y = bird.r;
+  }
+}
+
+/* --- vẽ --- */
+function drawBackground(){
+  ctx.fillStyle = '#70c5ce';
+  ctx.fillRect(0,0,LOG_W,LOG_H);
+  ctx.fillStyle = '#fff';
+  for(let i=0;i<3;i++){
+    ctx.beginPath();
+    ctx.arc(80+i*150,80,20,0,Math.PI*2);
+    ctx.arc(100+i*150,80,30,0,Math.PI*2);
+    ctx.arc(130+i*150,80,20,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function draw(){
+  drawBackground();
+  for(const p of pipes){
+    ctx.fillStyle = '#2ea84f';
+    const topH = p.gapY - GAP/2;
+    ctx.fillRect(p.x, 0, PIPE_W, topH);
+    ctx.fillRect(p.x, p.gapY + GAP/2, PIPE_W, LOG_H - GROUND_H - (p.gapY + GAP/2));
+  }
+  ctx.fillStyle = '#d7b36a';
+  ctx.fillRect(0, LOG_H - GROUND_H, LOG_W, GROUND_H);
+
+  drawBird();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 42px sans-serif';
+  ctx.textAlign = 'center';
+  if(state==='playing' || state==='dead'){ ctx.fillText(score, LOG_W/2, 84); }
+
+  if(state==='menu'){
+    ctx.fillStyle = '#fff';
+    ctx.font = '28px sans-serif';
+    ctx.fillText('Flappy Bird', LOG_W/2, 140);
+    ctx.font = '16px sans-serif';
+    ctx.fillText('Click / Tap / Space để nhảy', LOG_W/2, 180);
+    ctx.font = '14px sans-serif';
+    ctx.fillText('Best: ' + best, LOG_W/2, 210);
+  } else if(state==='dead'){
+    ctx.fillStyle='rgba(0,0,0,0.5)';
+    ctx.fillRect(28,160,LOG_W-56,220);
+    ctx.fillStyle='#fff';
+    ctx.font='26px sans-serif';
+    ctx.fillText('Game Over', LOG_W/2,220);
+    ctx.font='18px sans-serif';
+    ctx.fillText('Score: '+score+'   Best: '+best, LOG_W/2,260);
+    ctx.font='14px sans-serif';
+    ctx.fillText('Click/Tap để chơi lại (R để restart)', LOG_W/2,300);
+  }
+}
+
+function drawBird(){
+  ctx.save();
+  ctx.translate(bird.x, bird.y);
+  ctx.rotate(bird.rotation);
+  ctx.beginPath();
+  ctx.fillStyle='#ffeb3b';
+  ctx.strokeStyle='#000';
+  ctx.lineWidth=2;
+  ctx.arc(0,0,bird.r,0,Math.PI*2);
+  ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.fillStyle='#f4a300';
+  let wingOffset = Math.sin(Date.now()/100)*3;
+  ctx.ellipse(-4,wingOffset,8,5,0,0,Math.PI*2);
+  ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.fillStyle='#fff';
+  ctx.arc(6,-4,4,0,Math.PI*2); ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.fillStyle='#000';
+  ctx.arc(6,-4,2,0,Math.PI*2); ctx.fill();
+
+  ctx.beginPath();
+  ctx.fillStyle='#ff9800';
+  ctx.moveTo(12,-2); ctx.lineTo(18,0); ctx.lineTo(12,2); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+/* --- main loop --- */
+function frame(ts){
+  if(!lastTime) lastTime = ts;
+  const dt = Math.min((ts - lastTime) / 1000, 0.05); // clamp dt a bit
+  lastTime = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
